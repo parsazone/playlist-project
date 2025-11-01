@@ -126,7 +126,39 @@
     /* touch-friendly */
     button{touch-action:manipulation}
     i.fa {pointer-events:none}
-  </style>
+  
+/* volume: hidden vertical slider shown on hover of the icon */
+.volume-wrapper{position:relative;display:flex;align-items:center;gap:8px}
+/* the slider is absolutely positioned above the icon so it does not shift layout */
+.volume-wrapper .volume-range{ -webkit-appearance:none; appearance:none; width:90px; height:12px; background:rgba(0,0,0,0.08); border-radius:8px; display:none; position:absolute; bottom: calc(100% + 24px + 1cm); left:50%; transform:translateX(-50%) rotate(-90deg); transform-origin:center center; z-index:50; box-shadow:0 6px 18px rgba(0,0,0,0.12); padding:0}
+.volume-wrapper .volume-range::-webkit-slider-runnable-track{ height:14px; border-radius:8px; background:transparent }
+.volume-wrapper .volume-range::-webkit-slider-thumb{ -webkit-appearance:none; width:14px; height:14px; border-radius:50%; background:#fff; box-shadow:0 3px 8px rgba(0,0,0,0.28); margin-top:-1px; }
+.volume-wrapper .volume-range::-moz-range-track{ height:14px; border-radius:8px; }
+.volume-wrapper .volume-range::-moz-range-thumb{ width:14px; height:14px; border-radius:50%; background:#fff; box-shadow:0 3px 8px rgba(0,0,0,0.28); }
+
+/* show slider only on hover (doesn't affect icon position) */
+.volume-wrapper:hover .volume-range,
+.volume-wrapper:focus-within .volume-range { display:block; opacity:1; transform:translateX(-50%) rotate(-90deg); transition:opacity .18s ease, transform .18s ease; }
+.volume-wrapper:hover #volume-display,
+.volume-wrapper:focus-within #volume-display { display:block; }
+
+#volume-btn{position:relative; z-index:60}
+
+
+/* custom scrollbar for song list to match dark theme */
+.song-list{ scrollbar-width: thin; scrollbar-color: rgba(0,0,0,0.12) transparent; }
+.song-list::-webkit-scrollbar{ width:10px; }
+.song-list::-webkit-scrollbar-track{ background: transparent; }
+.song-list::-webkit-scrollbar-thumb{ background: rgba(0,0,0,0.12); border-radius:10px; border:2px solid transparent; }
+.song-list::-webkit-scrollbar-thumb:hover{ background: rgba(0,0,0,0.18); }
+
+/* Dark theme overrides: make scrollbar thumb light (white-ish) to match dark background */
+[data-theme="dark"] .song-list{ scrollbar-color: rgba(255,255,255,0.22) transparent; }
+[data-theme="dark"] .song-list::-webkit-scrollbar-thumb{ background: rgba(255,255,255,0.22); }
+[data-theme="dark"] .song-list::-webkit-scrollbar-thumb:hover{ background: rgba(255,255,255,0.32); }
+
+
+</style>
 </head>
 <body data-theme="dark">
   <div class="app" id="app">
@@ -242,6 +274,11 @@
 
       <div style="display:flex;gap:8px;align-items:center">
         <button id="shuffle" class="button"><i class="fa-solid fa-shuffle"></i></button>
+        <div class="volume-wrapper" style="display:flex;align-items:center;position:relative">
+          <button id="volume-btn" class="button" title="Volume"><i id="volume-icon" class="fa-solid fa-volume-high"></i></button>
+          <input id="volume-range" class="volume-range" type="range" min="0" max="100" step="1">
+          <div id="volume-display" class="tiny muted" style="display:none">100%</div>
+        </div>
         <button id="btn-save" class="button"><i class="fa-solid fa-floppy-disk"></i> Save</button>
       </div>
     </footer>
@@ -260,8 +297,8 @@
       function escapeHtml(str){return String(str||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\"/g,'&quot;').replace(/'/g,'&#039;');}
       function now(){return Date.now()}
 
-      // default state
-      const defaultState = {playlists:[], activePlaylistId:null, activeSongId:null, playing:false, shuffle:false, theme:'dark'};
+      // default state (added volume)
+      const defaultState = {playlists:[], activePlaylistId:null, activeSongId:null, playing:false, shuffle:false, theme:'dark', volume:1};
 
       // load / save
       function loadState(){try{const raw=localStorage.getItem(STORAGE_KEY); if(!raw) return JSON.parse(JSON.stringify(defaultState)); const parsed=JSON.parse(raw); return Object.assign(JSON.parse(JSON.stringify(defaultState)), parsed);}catch(e){console.error('loadState',e); return JSON.parse(JSON.stringify(defaultState));}}
@@ -311,8 +348,12 @@
       const saveBtn = document.getElementById('btn-save');
       const themeToggle = document.getElementById('theme-toggle');
 
+      const volumeRange = document.getElementById('volume-range');
+      const volumeDisplay = document.getElementById('volume-display');
+      const volumeBtn = document.getElementById('volume-btn');
+      const volumeIcon = document.getElementById('volume-icon');
+
       // in-memory map for uploaded files (object URLs & file references)
-      // NOTE: fileStore is not persisted across page reloads because browsers don't allow storing binary blobs in localStorage easily.
       const fileStore = {}; // id -> {objectURL, file, meta}
 
       // helper to update play button icon
@@ -322,12 +363,14 @@
 
       // --- Helpers ---
       function ensureUploadsPlaylist(){
-        // ensure a dedicated "Uploads" staging playlist exists, but we won't auto-add uploaded files to other playlists by default
         let pl = state.playlists.find(p=>p.name==='Uploads');
         if(!pl){ pl = {id:uid('pl'), name:'Uploads', songs:[], created:now()}; state.playlists.push(pl); saveState(); }
         if(!state.activePlaylistId) state.activePlaylistId = state.playlists[0]?.id || pl.id;
         return pl;
       }
+
+      // helper to find song and its parent playlist
+      function findSongAndPlaylist(songId){ for(const p of state.playlists){ const s = p.songs.find(x=>x.id===songId); if(s) return {song:s, playlist:p}; } return null; }
 
       // --- Rendering playlists & songs ---
       function renderPlaylists(){
@@ -356,7 +399,7 @@
           div.querySelector('.edit').addEventListener('click',(e)=>{e.stopPropagation(); const nv = prompt('Rename playlist', pl.name); if(nv && nv.trim()) updatePlaylistName(pl.id, nv.trim());});
           div.addEventListener('click', ()=> setActivePlaylist(pl.id));
 
-          // drag & drop handlers for reordering playlists and accepting file drops
+          // drag & drop handlers for reordering playlists and accepting file/song drops
           div.addEventListener('dragstart',(e)=>{ e.dataTransfer.setData('text/plain', pl.id); div.classList.add('dragging'); e.dataTransfer.effectAllowed = 'move'; });
           div.addEventListener('dragend',()=>{ div.classList.remove('dragging'); });
 
@@ -364,12 +407,33 @@
           div.addEventListener('dragleave',()=>{ div.style.transform=''; });
           div.addEventListener('drop',(e)=>{
             e.preventDefault(); div.style.transform=''; const payload = e.dataTransfer.getData('text/plain') || '';
+
             // if payload is a file id (prefix 'file:...'), add that file to this playlist
             if(payload.startsWith('file:')){
               const fid = payload.slice(5);
               addFileToPlaylistById(pl.id, fid);
               return;
             }
+
+            // if payload is a song id (prefix 'song:...'), move that song between playlists
+            if(payload.startsWith('song:')){
+              const sid = payload.slice(5);
+              const found = findSongAndPlaylist(sid);
+              if(!found) return;
+              const srcPl = found.playlist;
+              const songObj = found.song;
+              if(srcPl.id === pl.id) return; // dropped on same playlist => nothing
+
+              // remove from source playlist
+              srcPl.songs = srcPl.songs.filter(x=>x.id!==sid);
+
+              // push into destination playlist (preserve song object)
+              pl.songs.push(songObj);
+
+              saveState(); renderPlaylists(); renderActivePlaylist();
+              return;
+            }
+
             // otherwise it's a playlist reorder
             const srcId = payload;
             if(!srcId || srcId===pl.id) return;
@@ -416,13 +480,9 @@
           div.querySelector('.remove-file').addEventListener('click',(ev)=>{ ev.stopPropagation(); // only remove if not referenced from any playlist
             if(isFileReferenced(id)){
               if(!confirm('This file is used in one or more playlists. Remove staging entry but keep media references?')) return; // do not remove
-              // remove only from staging view but keep fileStore (we'll keep file reference)
-              // to remove fully you'd need to remove songs that reference it first
               delete fileStore[id];
-              // revoke object url
               try{ URL.revokeObjectURL(info.objectURL);}catch(e){}
             } else {
-              // safe to fully remove
               try{ URL.revokeObjectURL(info.objectURL);}catch(e){}
               delete fileStore[id];
             }
@@ -476,12 +536,15 @@
           });
 
           // drag & drop for song reorder
-          sdiv.addEventListener('dragstart',(e)=>{ e.dataTransfer.setData('text/plain', s.id); sdiv.classList.add('dragging'); e.dataTransfer.effectAllowed='move'; });
+          sdiv.addEventListener('dragstart',(e)=>{ e.dataTransfer.setData('text/plain', 'song:'+s.id); sdiv.classList.add('dragging'); e.dataTransfer.effectAllowed='move'; });
           sdiv.addEventListener('dragend',()=>{ sdiv.classList.remove('dragging'); });
           sdiv.addEventListener('dragover',(e)=>{ e.preventDefault(); sdiv.style.transform='translateY(-6px)'; });
           sdiv.addEventListener('dragleave',()=>{ sdiv.style.transform=''; });
           sdiv.addEventListener('drop',(e)=>{
-            e.preventDefault(); sdiv.style.transform=''; const srcId = e.dataTransfer.getData('text/plain'); if(!srcId || srcId===s.id) return;
+            e.preventDefault(); sdiv.style.transform=''; const srcIdRaw = e.dataTransfer.getData('text/plain');
+            // support both 'song:...' payload and old plain ids
+            const srcId = srcIdRaw.startsWith('song:') ? srcIdRaw.slice(5) : srcIdRaw;
+            if(!srcId || srcId===s.id) return;
             const srcIndex = pl.songs.findIndex(x=>x.id===srcId);
             const dstIndex = pl.songs.findIndex(x=>x.id===s.id);
             if(srcIndex>-1){ const [a] = pl.songs.splice(srcIndex,1); pl.songs.splice(dstIndex,0,a); saveState(); renderActivePlaylist(); }
@@ -500,10 +563,7 @@
       }
 
       function deletePlaylist(id){ if(!confirm('Delete this playlist?')) return; const pl = state.playlists.find(p=>p.id===id); if(pl){
-          // only revoke and remove fileStore entries if they are not referenced from any other playlist after deletion
           for(const s of pl.songs){ if(s.fileId && fileStore[s.fileId]){
-            // temporarily remove this playlist's songs and test references
-            // we'll check if any other playlist references the same fileId
             const stillReferenced = state.playlists.some(p=> p.id!==id && p.songs.some(ss=>ss.fileId===s.fileId));
             if(!stillReferenced){ try{ URL.revokeObjectURL(fileStore[s.fileId].objectURL);}catch(e){} delete fileStore[s.fileId]; }
           }}
@@ -519,7 +579,6 @@
       function addFileToPlaylistById(plId, fileId){
         const pl = state.playlists.find(p=>p.id===plId); if(!pl) return alert('Playlist not found');
         if(!fileStore[fileId]) return alert('File not available (it may have been cleared)');
-        // avoid duplicates by fileId
         if(pl.songs.some(s=>s.fileId===fileId)) { alert('This file is already in the target playlist.'); return; }
         const meta = fileStore[fileId].meta || {};
         const song = { id:uid('s'), title: meta.title || fileStore[fileId].file.name, artist: meta.artist||'', url:'', fileId:fileId, cover: meta.cover||null };
@@ -533,7 +592,6 @@
 
       function removeSongFromPlaylist(plId,songId){ const pl = state.playlists.find(p=>p.id===plId); if(!pl) return; const s = pl.songs.find(x=>x.id===songId);
         if(s && s.fileId && fileStore[s.fileId]){
-          // only remove fileStore entry if no other song references it
           const referencedElsewhere = state.playlists.some(p=> p.id!==plId && p.songs.some(ss=> ss.fileId===s.fileId ));
           if(!referencedElsewhere){ try{ URL.revokeObjectURL(fileStore[s.fileId].objectURL);}catch(e){} delete fileStore[s.fileId]; }
         }
@@ -565,8 +623,6 @@
 
             fileStore[id].meta = {title: title || f.name, artist: artist || '', cover: coverDataUrl};
 
-            // By default we stage uploaded files in the "Uploads" playlist but do not duplicate them across playlists.
-            // If the currently active playlist is the dedicated 'Uploads' playlist we'll also add it there for convenience.
             const uploadsPl = ensureUploadsPlaylist();
             if(state.activePlaylistId === uploadsPl.id){ // auto-add only when 'Uploads' is active
               addFileToPlaylistById(uploadsPl.id, id);
@@ -628,6 +684,23 @@
       themeToggle.addEventListener('click', ()=>{ state.theme = state.theme==='dark' ? 'light' : 'dark'; applyTheme(); saveState(); });
       if(!state.theme) state.theme = 'dark'; applyTheme();
 
+      // volume setup: hidden vertical slider + mute toggle
+      // helper to paint slider background (filled part) using accent color
+      function paintVolumeSlider(val){ const pct = Math.round((val||0)*100); // rotated slider uses left-to-right gradient
+        volumeRange.style.background = `linear-gradient(90deg, var(--accent) ${pct}%, rgba(0,0,0,0.08) ${pct}%)`; }
+
+      function applyVolume(){ audio.volume = (typeof state.volume === 'number') ? state.volume : 1; volumeRange.value = Math.round((audio.volume||1) * 100); volumeDisplay.textContent = Math.round((audio.volume||1)*100) + '%'; paintVolumeSlider(audio.volume); if(audio.muted || audio.volume===0){ volumeIcon.className = 'fa-solid fa-volume-xmark'; } else { volumeIcon.className = 'fa-solid fa-volume-high'; } }
+
+      // events
+      let prevVolume = (typeof state.volume === 'number') ? state.volume : 1;
+      volumeRange.addEventListener('input', (e)=>{ const v = Number(e.target.value)/100; audio.volume = v; if(!audio.muted) prevVolume = v; state.volume = v; volumeDisplay.textContent = Math.round(v*100) + '%'; paintVolumeSlider(v); saveState(); });
+
+      // click toggles mute
+      volumeBtn.addEventListener('click',(e)=>{ e.stopPropagation(); if(audio.muted || audio.volume===0){ audio.muted = false; audio.volume = prevVolume || 1; state.volume = audio.volume; volumeIcon.className = 'fa-solid fa-volume-high'; } else { audio.muted = true; prevVolume = audio.volume; audio.volume = 0; state.volume = 0; volumeIcon.className = 'fa-solid fa-volume-xmark'; } volumeDisplay.textContent = Math.round((audio.volume||0)*100) + '%'; paintVolumeSlider(audio.volume||0); saveState(); });
+
+      // initialize
+      if(typeof state.volume !== 'number') state.volume = 1; applyVolume();
+
       // helper: find song
       function findSong(songId){ for(const p of state.playlists){ const s = p.songs.find(x=>x.id===songId); if(s) return s; } return null; }
 
@@ -646,7 +719,7 @@
 
       // init render
       function renderAll(){ renderPlaylists(); renderActivePlaylist(); renderUploadList(); updateUIFromState(); }
-      function updateUIFromState(){ shuffleBtn.style.opacity = state.shuffle ? '1' : '0.6'; applyTheme(); }
+      function updateUIFromState(){ shuffleBtn.style.opacity = state.shuffle ? '1' : '0.6'; applyTheme(); applyVolume(); }
       renderAll();
 
       // --- Service worker (PWA) ---
